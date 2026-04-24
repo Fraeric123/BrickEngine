@@ -26,11 +26,13 @@
             BrickEngine
         } from './brickengine.js';
 
+        let Engine = new BrickEngine();
 
-        BrickEngine.init({
-
+        Engine.init({
+            display_mode: 'normal_canvas'
         }).then(() => {
-
+            
+            Engine.start();
         });
 
     </script>
