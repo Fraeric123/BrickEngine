@@ -22,6 +22,373 @@ import { TAARenderPass }   from './libs/postprocessing/TAARenderPass.js';
 
 /* Exports */
 
+export class Sky {
+    constructor(engine, world, params) {
+        this.engine = engine;
+        this.world = world;
+        this.params = params;
+        this.object3D = new this.engine.THREE.Object3D();
+        this.set_hdri(params.hdri, params.exposure);
+        world.scene.add(this.object3D);
+    }
+}
+
+export class Lighting {
+    constructor(engine, world, params) {
+        this.engine = engine;
+
+        this.world = world;
+        this.params = params;
+
+        this.object3D = new this.engine.THREE.Object3D();
+        const directionalLight = new this.engine.THREE.DirectionalLight(params.color, params.intensity);
+        this.object3D.add(directionalLight);
+        const ambientLight = new this.engine.THREE.AmbientLight(params.ambientColor, params.ambientIntensity);
+        this.object3D.add(ambientLight);
+        world.scene.add(this.object3D);
+
+        directionalLight.position.set(0, 10, 0);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        directionalLight.shadow.camera.near = 0.5;
+        directionalLight.shadow.camera.far = 50;
+        directionalLight.shadow.camera.left = -20;
+        directionalLight.shadow.camera.right = 20;
+        directionalLight.shadow.camera.top = 20;
+        directionalLight.shadow.camera.bottom = -20;
+    }
+}
+
+export class World {
+    constructor(engine) {
+        this.engine = engine;
+
+        this.scene = new engine.THREE.Scene();
+        this.camera = new engine.THREE.PerspectiveCamera(75, engine.width / engine.height, 0.1, 1000);
+        this.raycaster = new engine.THREE.Raycaster();        
+        this.listener = new engine.THREE.AudioListener();
+        this.camera.add(this.listener);
+        this.world = new engine.rapier.World({ x: 0, y: -9.81, z: 0 });
+        this.eventQueue = new engine.rapier.EventQueue();
+
+        this.camera.rotation.order = 'YXZ';        
+        this.camera.position.set(0, 2, 8);
+        this.camera.lookAt(0, 0, 0);
+
+        this.camera_speed = 1;
+        this.targetZoom = 1.0;
+        this.zoomSmoothness = 0.1;
+        this.defaultFOV = 75;
+        this.targetFOV = 75;
+        this.zoomLevel = 1.0;
+        this.camera_mode = "free"; // "free" or "follow"
+        this.cameraTarget = null;
+        this.raycasting = false;
+        this.raycastTimer = 0;
+        this.raycastDelay = 0.1;
+
+        this.debugEnabled = false;
+        this.debugMesh = new engine.THREE.LineSegments(
+            new engine.THREE.BufferGeometry(),
+            new engine.THREE.LineBasicMaterial({ color: 0xff0000, vertexColors: false })
+        );
+        this.debugMesh.frustumCulled = false;
+        this.scene.add(this.debugMesh);
+
+        this.running = true;
+        this.instances = new Map();
+    }
+
+
+    // skybox functions
+
+    set_hdri(name, exposure = 1.0) {
+        const hdri = this.engine.get_hdri(name);
+        if (!hdri) return;
+        this.scene.background = hdri;
+        this.scene.environment = hdri;
+        this.engine.renderer.toneMappingExposure = exposure;
+    }
+
+
+    // property management
+
+    set_camera_position(x, y, z) {
+        this.camera.position.set(x, y, z);
+    }
+
+
+    // physics management
+
+    handleCollision(h1, h2) {
+        const col1 = this.world.getCollider(h1);
+        const col2 = this.world.getCollider(h2);
+        if (!col1 || !col2) return;
+
+        const body1 = col1.parent();
+        const body2 = col2.parent();
+        const inst1 = body1?.userData?.instance;
+        const inst2 = body2?.userData?.instance;
+        if (!inst1 || !inst2) return;
+
+        const v1 = body1.linvel();
+        const v2 = body2.linvel();
+
+        const impactForce = Math.sqrt(
+            Math.pow(v1.x - v2.x, 2) +
+            Math.pow(v1.y - v2.y, 2) +
+            Math.pow(v1.z - v2.z, 2)
+        );
+
+        if (impactForce > 1.5) {
+            [inst1, inst2].forEach(inst => {
+                if (inst.materialDef && inst.materialDef.sounds.impact) {
+                    const pos = inst.rigidBody.translation();
+
+                    this.engine.play_sound_3d(inst.materialDef.sounds.impact, pos, {
+                        volume: Math.min(impactForce * 0.1, 1.0),
+                        refDistance: 2.0
+                    });
+                }
+            });
+        }
+
+        if (inst1.onCollide) {
+            inst1.onCollide(inst1, inst2, impactForce);
+        }
+        if (inst2.onCollide) {
+            inst2.onCollide(inst2, inst1, impactForce);
+        }
+    }
+
+
+    // instance management
+
+    add_instance(name, InstanceClass, params = {}) {
+        const instance = new InstanceClass(this.engine, this, params);
+        this.instances.set(name, instance);
+        instance.init();
+        if (instance.object3D) instance.object3D.userData.instanceId = name;
+        return instance;
+    }
+
+    remove_instance(name) {
+        const instance = this.instances.get(name);
+        if (!instance) return;
+
+        instance.destroy();
+        this.instances.delete(name);
+    }
+
+    get_instance(name) {
+        return this.instances.get(name);
+    }
+
+    get_first_instance_of_class(instance_class) {
+        for (const instance of this.instances.values()) {
+            if (instance instanceof instance_class) {
+                return instance;
+            }
+        }
+        return null;
+    }
+
+
+    // lifecycle
+
+    init() {
+        for (const instance of this.instances.values()) {
+            instance.init();
+        }
+    }
+
+    render(alpha, renderDt) {
+        for (const instance of this.instances.values()) {
+            if (instance instanceof PortalInstance && instance.linkedPortal) {
+                instance.renderPortalView(
+                    this.engine.renderer,
+                    this.camera,
+                    this.scene
+                );
+            }
+        }
+
+        const portalTime = performance.now() * 0.006;
+        for (const instance of this.instances.values()) {
+            if (instance instanceof PortalInstance && instance.frameMesh) {
+                const p = 0.85 + 0.15 * Math.sin(portalTime + (instance.portalColor === 0xff7700 ? 0 : Math.PI));
+                instance.frameMesh.material.opacity = p;
+
+                // Přidáme frame do outlinePass pokud existuje
+                if (this.engine.outlinePass && !this.engine.outlinePass._portalFrames) {
+                    this.engine.outlinePass._portalFrames = true;
+                }
+            }
+        }
+
+        if (this.engine.outlinePass) {
+            const time = performance.now() * 0.007;
+            const pulse = 4.0 + Math.sin(time) * 1.0;
+
+            this.engine.outlinePass.edgeStrength = pulse;
+            this.engine.outlinePass.edgeGlow = 0.5 + Math.sin(time) * 0.2;
+            this.engine.outlinePass.edgeThickness = 1.0;
+        }
+
+        this.camera.rotation.y = this.engine.look.yaw;
+        this.camera.rotation.x = this.engine.look.pitch;
+
+        if (!this.player) { this.player = this.get_first_instance_of_class(Player) }
+        if (!this.player) { this.player = "no-player" }
+
+        if (this.engine.engine_mode === "game" && this.player) {
+            const player = this.player;
+            if (player && player.rigidBody) {
+                const pos = player.rigidBody.translation();
+
+                let bobX = Math.cos(player.bobTime * 0.5) * 0.05 * player.bobIntensity;
+                let bobY = Math.sin(player.bobTime) * 0.08 * player.bobIntensity;
+                let bobZ = 0;
+
+                const leanVisualOffset = player.leanOffset * 0.4;
+                const yaw = this.engine.look.yaw;
+
+                this.camera.position.set(
+                    pos.x + bobX + (Math.cos(yaw) * leanVisualOffset),
+                    pos.y + (player.currentVisualHeight * 0.5) + bobY,
+                    pos.z + (Math.sin(yaw) * leanVisualOffset)
+                );
+
+                this.camera.rotation.z = player.leanOffset * 0.05;
+            }
+        } else {
+            this.camera.rotation.z = 0;
+            const baseSpeed = this.engine.input.sprint ? 20 : 10;
+            const speed = baseSpeed * renderDt * this.camera_speed;
+
+            const forward = new this.engine.THREE.Vector3(
+                -Math.sin(this.camera.rotation.y),
+                0,
+                -Math.cos(this.camera.rotation.y)
+            );
+            const right = new this.engine.THREE.Vector3().crossVectors(forward, this.camera.up);
+
+            if (this.engine.input.forward) this.camera.position.addScaledVector(forward, speed);
+            if (this.engine.input.back) this.camera.position.addScaledVector(forward, -speed);
+            if (this.engine.input.left) this.camera.position.addScaledVector(right, -speed);
+            if (this.engine.input.right) this.camera.position.addScaledVector(right, speed);
+            if (this.engine.input.up) this.camera.position.y += speed;
+            if (this.engine.input.crouch) this.camera.position.y -= speed;
+        }
+
+        for (const instance of this.instances.values()) {
+            instance.sync_with_physics(alpha);
+        }
+
+        this.scene.updateMatrixWorld(true);
+
+        this.raycastTimer += renderDt;
+
+        if (this.raycastTimer > this.raycastDelay && this.raycasting) {
+            this.raycastTimer = 0;
+
+            this.raycaster.setFromCamera(this.engine.look.locked ? { x: 0, y: 0 } : this.engine.mouse, this.camera);
+
+            const targetableObjects = [];
+            for (const instance of this.instances.values()) {
+                if (instance.object3D) targetableObjects.push(instance.object3D);
+            }
+
+            const intersects = this.raycaster.intersectObjects(targetableObjects, true);
+
+            if (intersects.length > 0) {
+                let object = intersects[0].object;
+
+                let rootObject = object;
+                while (rootObject.parent && !rootObject.userData.instanceId) {
+                    rootObject = rootObject.parent;
+                }
+
+                if (this.engine.outlinePass) {
+                    this.engine.outlinePass.selectedObjects = [rootObject];
+                }
+
+                this.engine.canvas3D.style.cursor = 'pointer';
+            } else {
+                if (this.engine.outlinePass) {
+                    this.engine.outlinePass.selectedObjects = [];
+                }
+                this.engine.canvas3D.style.cursor = 'default';
+            }
+        }
+
+        if (Math.abs(this.camera.fov - this.targetFOV) > 0.1) {
+            this.camera.fov = this.engine.THREE.MathUtils.lerp(this.camera.fov, this.targetFOV, 0.15);
+            this.camera.updateProjectionMatrix();
+        }
+
+        if (this.engine.outlinePass) {
+            const portalFrames = [];
+            for (const instance of this.instances.values()) {
+                if (instance instanceof PortalInstance && instance.frameMesh) {
+                    portalFrames.push(instance.frameMesh);
+                }
+            }
+        }
+
+        if (this.debugEnabled) {
+            const { vertices, colors } = this.world.debugRender();
+            this.debugMesh.geometry.setAttribute('position', new this.engine.THREE.BufferAttribute(vertices, 3));
+            this.debugMesh.geometry.setAttribute('color', new this.engine.THREE.BufferAttribute(colors, 4));
+            this.debugMesh.visible = true;
+        } else {
+            this.debugMesh.visible = false;
+        }
+    }
+
+    update(dt) {
+        if (!this.running) return;
+
+        if (this.cameraTarget) {
+            this.camera.position.lerp(this.cameraTarget.position, 0.1);
+        }
+
+        if (this.engine.input.zoomHeld) {
+            const baseZoomFOV = 20;
+            if (this.engine.look.zoomDelta !== 0) {
+                this.zoomLevel += this.engine.look.zoomDelta * 2.0;
+                this.zoomLevel = this.engine.THREE.MathUtils.clamp(this.zoomLevel, 1.0, 10.0);
+                this.engine.look.zoomDelta = 0;
+            }
+
+            this.targetFOV = baseZoomFOV / this.zoomLevel;
+        } else {
+            this.targetFOV = this.defaultFOV;
+            this.zoomLevel = 1.0;
+            this.engine.look.zoomDelta = 0;
+        }
+        this.world.step(this.eventQueue);
+
+        this.eventQueue.drainCollisionEvents((handle1, handle2, started) => {
+            if (started) {
+                this.handleCollision(handle1, handle2);
+            }
+        });
+
+        for (const instance of this.instances.values()) {
+            instance.update(dt);
+        }
+    }
+
+    destroy() {
+        for (const instance of this.instances.values()) {
+            instance.destroy();
+        }
+    }
+}
+
+
 export class BrickEngine {
     constructor() {
         //libs

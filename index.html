@@ -23,16 +23,22 @@
     <script type="module">
 
         import {
-            BrickEngine
+            BrickEngine,
+            World
         } from './brickengine.js';
 
-        let Engine = new BrickEngine();
+        let engine = new BrickEngine();
 
-        Engine.init({
+        engine.init({
+
             display_mode: 'normal_canvas'
+
         }).then(() => {
+
+            engine.add_world("start_world", World);
+            engine.set_world("start_world");
+            engine.start();
             
-            Engine.start();
         });
 
     </script>
