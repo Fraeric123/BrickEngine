@@ -1,78 +1,258 @@
 
 /* Imports */
 
-import RAPIER         from './libs/rapier.js';
-import * as THREE     from './libs/three.module.js';
-import Stats          from './libs/stats.module.js';
+import RAPIER from './libs/rapier.js';
+import * as THREE from './libs/three.module.js';
+import Stats from './libs/stats.module.js';
 import { GLTFLoader } from './libs/GLTFLoader.js';
-import { clone }      from './libs/SkeletonUtils.js';
+import { clone } from './libs/SkeletonUtils.js';
 import { RGBELoader } from './libs/RGBELoader.js';
-import GUI            from './libs/lilgui.js';
+import GUI from './libs/lilgui.js';
 
-import { ShaderPass }      from './libs/postprocessing/ShaderPass.js';
-import { EffectComposer }  from './libs/postprocessing/EffectComposer.js';
-import { RenderPass }      from './libs/postprocessing/RenderPass.js';
+import { ShaderPass } from './libs/postprocessing/ShaderPass.js';
+import { EffectComposer } from './libs/postprocessing/EffectComposer.js';
+import { RenderPass } from './libs/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from './libs/postprocessing/UnrealBloomPass.js';
-import { OutputPass }      from './libs/postprocessing/OutputPass.js';
-import { BokehPass }       from './libs/postprocessing/BokehPass.js';
-import { GTAOPass }        from './libs/postprocessing/GTAOPass.js';
-import { SMAAPass }        from './libs/postprocessing/SMAAPass.js';
-import { OutlinePass }     from './libs/postprocessing/OutlinePass.js';
-import { TAARenderPass }   from './libs/postprocessing/TAARenderPass.js';
+import { OutputPass } from './libs/postprocessing/OutputPass.js';
+import { BokehPass } from './libs/postprocessing/BokehPass.js';
+import { GTAOPass } from './libs/postprocessing/GTAOPass.js';
+import { SMAAPass } from './libs/postprocessing/SMAAPass.js';
+import { OutlinePass } from './libs/postprocessing/OutlinePass.js';
+import { TAARenderPass } from './libs/postprocessing/TAARenderPass.js';
 
 /* Exports */
 
-export class Sky {
-    constructor(engine, world, params) {
+export class Instance {
+    constructor(engine, name) {
         this.engine = engine;
-        this.world = world;
-        this.params = params;
-        this.object3D = new this.engine.THREE.Object3D();
-        this.set_hdri(params.hdri, params.exposure);
-        world.scene.add(this.object3D);
+        this.name = name;
+        this.classname = this.constructor.name;
+        this.uuid = crypto.randomUUID();
+
+        this.onAdded = () => { };
+        this.onDestroyed = () => { };
+        this.onUpdated = (dt) => { };
+
+        this.parent = null;
+        this.children = [];
+    }
+
+    sync_with_physics(alpha) {
+        for (const instance of this.children) {
+            instance.sync_with_physics(alpha);
+        }
+    }
+
+    addChild(child) {
+        child.parent = this;
+        this.children.push(child);
+    }
+
+    removeChild(child) {
+        const i = this.children.indexOf(child);
+        if (i !== -1) {
+            child.parent = null;
+            this.children.splice(i, 1);
+        }
+    }
+
+    getChildren() {
+        return this.children;
+    }
+
+    get_decendants() {
+        let decendants = [];
+        for (const child of this.children) {
+            decendants.push(child);
+            decendants = decendants.concat(child.get_decendants());
+        }
+        return decendants;
+    }
+
+    findFirstChild(name) {
+        return this.children.find(c => c.name === name);
+    }
+
+    find_first_child_of_class(type) {
+        for (const child of this.children) {
+            if (child.classname === type) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    find_all_children_of_class(type) {
+        return this.children.filter(child => child.classname === type);
+    }
+
+    init() {
+        this.onAdded();
+    }
+
+    update(dt) {
+        this.onUpdated(dt);
+        for (const child of this.children) {
+            child.update?.(dt);
+        }
+    }
+
+    destroy() {
+        this.onDestroyed();
+        if (this.object3D) this.object3D.parent?.remove(this.object3D);
+        if (this.rigidBody) this.engine.activeMap.world.removeRigidBody(this.rigidBody);
+        for (const child of this.children) {
+            child.destroy?.();
+        }
+        this.children = [];
+        this.parent = null;
     }
 }
 
-export class Lighting {
-    constructor(engine, world, params) {
-        this.engine = engine;
+export class MaterialDefinition extends Instance {
+    constructor(engine, name) {
+        super(engine, name);
 
-        this.world = world;
-        this.params = params;
-
-        this.object3D = new this.engine.THREE.Object3D();
-        const directionalLight = new this.engine.THREE.DirectionalLight(params.color, params.intensity);
-        this.object3D.add(directionalLight);
-        const ambientLight = new this.engine.THREE.AmbientLight(params.ambientColor, params.ambientIntensity);
-        this.object3D.add(ambientLight);
-        world.scene.add(this.object3D);
-
-        directionalLight.position.set(0, 10, 0);
-        directionalLight.castShadow = true;
-        directionalLight.shadow.mapSize.width = 2048;
-        directionalLight.shadow.mapSize.height = 2048;
-        directionalLight.shadow.camera.near = 0.5;
-        directionalLight.shadow.camera.far = 50;
-        directionalLight.shadow.camera.left = -20;
-        directionalLight.shadow.camera.right = 20;
-        directionalLight.shadow.camera.top = 20;
-        directionalLight.shadow.camera.bottom = -20;
+        this.properties = {
+            roughness: 0.5,
+            metalness: 0.5,
+            transparent: false,
+            opacity: 1.0,
+            textures: {
+                albedo: null,
+                normal: null,
+                roughness: null,
+                metalness: null,
+                ao: null,
+                alpha: null
+            },
+            sounds: {
+                impact: null,
+                step: null,
+                break: null,
+                slide: null
+            }
+        };
     }
 }
 
-export class World {
+export class BasePart extends Instance {
     constructor(engine) {
-        this.engine = engine;
+        super(engine, "BasePart");
 
+        this.properties = {
+            size: new this.engine.THREE.Vector3(1, 1, 3),
+            position: new this.engine.THREE.Vector3(0, 0, 0),
+            rotation: new this.engine.THREE.Vector3(0, 0, 0),
+            color: 0x00ff00,
+            material: null
+        };
+
+        this.onCollide = () => { };
+    }
+
+    
+
+    update(dt) {
+        if (!this.engine.activeMap || !this.parent) return;
+        for (const child of this.children) {
+            if (child.update) {
+                child.update(dt);
+            }
+        }
+    }
+}
+
+export class Model extends Instance {
+    constructor(engine) {
+        super(engine, "Model");
+    }
+
+    update(dt) {
+        if (!this.engine.activeMap || !this.parent) return;
+        for (const child of this.children) {
+            if (child.update) {
+                child.update(dt);
+            }
+        }
+    }
+}
+
+export class Folder extends Instance {
+    constructor(engine) {
+        super(engine, "Folder");
+    }
+
+    update(dt) {
+        if (!this.engine.activeMap || !this.parent) return;
+        for (const child of this.children) {
+            if (child.update) {
+                child.update(dt);
+            }
+        }
+    }
+}
+
+
+
+
+export class Lighting extends Instance {
+    constructor(engine) {
+        super(engine, "Lighting");
+
+        this.properties = {
+            sunColor: 0xffffff,
+            sunIntensity: 1.0,
+            sunPosition: new this.engine.THREE.Vector3(0, 1, 0),
+            ambientColor: 0xffffff,
+            ambientIntensity: 0.2
+        };
+    }
+
+    update(dt) {
+        if (!this.engine.activeMap || !this.parent || this.parent !== this.engine.activeMap) return;
+        const scene = this.engine.activeMap.scene;
+
+        let sun = scene.getObjectByName("DirectionalLight");
+        if (!sun) {
+            sun = new this.engine.THREE.DirectionalLight(this.properties.sunColor, this.properties.sunIntensity);
+            sun.name = "DirectionalLight";
+            scene.add(sun);
+        }
+        sun.color.set(this.properties.sunColor);
+        sun.intensity = this.properties.sunIntensity;
+        sun.position.copy(this.properties.sunPosition);
+        let ambient = scene.getObjectByName("AmbientLight");
+        if (!ambient) {
+            ambient = new this.engine.THREE.AmbientLight(this.properties.ambientColor, this.properties.ambientIntensity);
+            ambient.name = "AmbientLight";
+            scene.add(ambient);
+        }
+        ambient.color.set(this.properties.ambientColor);
+        ambient.intensity = this.properties.ambientIntensity;
+    }
+}
+
+export class Workspace extends Instance {
+    constructor(engine) {
+        super(engine, "Workspace");
+    }
+}
+
+export class GameMap extends Instance {
+    constructor(engine, name) {
+        super(engine, "GameMap");
+        this.name = name;
+        this.uuid = crypto.randomUUID();
         this.scene = new engine.THREE.Scene();
         this.camera = new engine.THREE.PerspectiveCamera(75, engine.width / engine.height, 0.1, 1000);
-        this.raycaster = new engine.THREE.Raycaster();        
+        this.raycaster = new engine.THREE.Raycaster();
         this.listener = new engine.THREE.AudioListener();
         this.camera.add(this.listener);
         this.world = new engine.rapier.World({ x: 0, y: -9.81, z: 0 });
         this.eventQueue = new engine.rapier.EventQueue();
 
-        this.camera.rotation.order = 'YXZ';        
+        this.camera.rotation.order = 'YXZ';
         this.camera.position.set(0, 2, 8);
         this.camera.lookAt(0, 0, 0);
 
@@ -96,8 +276,13 @@ export class World {
         this.debugMesh.frustumCulled = false;
         this.scene.add(this.debugMesh);
 
+        this.lighting = new Lighting(engine);
+        this.workspace = new Workspace(engine);
+
+        super.addChild(this.lighting);
+        super.addChild(this.workspace);
+
         this.running = true;
-        this.instances = new Map();
     }
 
 
@@ -162,71 +347,15 @@ export class World {
         }
     }
 
-
-    // instance management
-
-    add_instance(name, InstanceClass, params = {}) {
-        const instance = new InstanceClass(this.engine, this, params);
-        this.instances.set(name, instance);
-        instance.init();
-        if (instance.object3D) instance.object3D.userData.instanceId = name;
-        return instance;
-    }
-
-    remove_instance(name) {
-        const instance = this.instances.get(name);
-        if (!instance) return;
-
-        instance.destroy();
-        this.instances.delete(name);
-    }
-
-    get_instance(name) {
-        return this.instances.get(name);
-    }
-
-    get_first_instance_of_class(instance_class) {
-        for (const instance of this.instances.values()) {
-            if (instance instanceof instance_class) {
-                return instance;
-            }
-        }
-        return null;
-    }
-
-
     // lifecycle
 
     init() {
-        for (const instance of this.instances.values()) {
+        for (const instance of this.children) {
             instance.init();
         }
     }
 
     render(alpha, renderDt) {
-        for (const instance of this.instances.values()) {
-            if (instance instanceof PortalInstance && instance.linkedPortal) {
-                instance.renderPortalView(
-                    this.engine.renderer,
-                    this.camera,
-                    this.scene
-                );
-            }
-        }
-
-        const portalTime = performance.now() * 0.006;
-        for (const instance of this.instances.values()) {
-            if (instance instanceof PortalInstance && instance.frameMesh) {
-                const p = 0.85 + 0.15 * Math.sin(portalTime + (instance.portalColor === 0xff7700 ? 0 : Math.PI));
-                instance.frameMesh.material.opacity = p;
-
-                // Přidáme frame do outlinePass pokud existuje
-                if (this.engine.outlinePass && !this.engine.outlinePass._portalFrames) {
-                    this.engine.outlinePass._portalFrames = true;
-                }
-            }
-        }
-
         if (this.engine.outlinePass) {
             const time = performance.now() * 0.007;
             const pulse = 4.0 + Math.sin(time) * 1.0;
@@ -239,7 +368,7 @@ export class World {
         this.camera.rotation.y = this.engine.look.yaw;
         this.camera.rotation.x = this.engine.look.pitch;
 
-        if (!this.player) { this.player = this.get_first_instance_of_class(Player) }
+        // if (!this.player) { this.player = this.get_first_instance_of_class(Player) }
         if (!this.player) { this.player = "no-player" }
 
         if (this.engine.engine_mode === "game" && this.player) {
@@ -282,7 +411,7 @@ export class World {
             if (this.engine.input.crouch) this.camera.position.y -= speed;
         }
 
-        for (const instance of this.instances.values()) {
+        for (const instance of this.children) {
             instance.sync_with_physics(alpha);
         }
 
@@ -296,7 +425,7 @@ export class World {
             this.raycaster.setFromCamera(this.engine.look.locked ? { x: 0, y: 0 } : this.engine.mouse, this.camera);
 
             const targetableObjects = [];
-            for (const instance of this.instances.values()) {
+            for (const instance of this.children) {
                 if (instance.object3D) targetableObjects.push(instance.object3D);
             }
 
@@ -326,15 +455,6 @@ export class World {
         if (Math.abs(this.camera.fov - this.targetFOV) > 0.1) {
             this.camera.fov = this.engine.THREE.MathUtils.lerp(this.camera.fov, this.targetFOV, 0.15);
             this.camera.updateProjectionMatrix();
-        }
-
-        if (this.engine.outlinePass) {
-            const portalFrames = [];
-            for (const instance of this.instances.values()) {
-                if (instance instanceof PortalInstance && instance.frameMesh) {
-                    portalFrames.push(instance.frameMesh);
-                }
-            }
         }
 
         if (this.debugEnabled) {
@@ -376,13 +496,13 @@ export class World {
             }
         });
 
-        for (const instance of this.instances.values()) {
+        for (const instance of this.children) {
             instance.update(dt);
         }
     }
 
     destroy() {
-        for (const instance of this.instances.values()) {
+        for (const instance of this.children) {
             instance.destroy();
         }
     }
@@ -433,8 +553,8 @@ export class BrickEngine {
         this.postProcessEnabled = true;
 
         // main variables
-        this.worlds = new Map();
-        this.activeWorld = null;
+        this.maps = new Map();
+        this.activeMap = null;
         this.renderer = null;
         this.engine_mode = "game"; // "editor" or "game"
         this.mouse = new this.THREE.Vector2();
@@ -520,8 +640,8 @@ export class BrickEngine {
             }
             if (e.code === 'F2') {
                 e.preventDefault();
-                if (this.activeScene) {
-                    this.activeScene.debugEnabled = !this.activeScene.debugEnabled;
+                if (this.activeMap) {
+                    this.activeMap.debugEnabled = !this.activeMap.debugEnabled;
                 }
             }
             if (e.code === 'F4') {
@@ -554,8 +674,8 @@ export class BrickEngine {
                 this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
             } else {
                 let sens = this.look.sensitivity;
-                if (this.activeScene && this.activeScene.camera) {
-                    sens *= (this.activeScene.camera.fov / 75);
+                if (this.activeMap && this.activeMap.camera) {
+                    sens *= (this.activeMap.camera.fov / 75);
                 }
 
                 this.look.yaw -= e.movementX * sens;
@@ -611,9 +731,9 @@ export class BrickEngine {
             this.renderer.setPixelRatio(this.dpr);
         }
 
-        if (this.activeScene && this.activeScene.camera) {
-            this.activeScene.camera.aspect = this.width / this.height;
-            this.activeScene.camera.updateProjectionMatrix();
+        if (this.activeMap && this.activeMap.camera) {
+            this.activeMap.camera.aspect = this.width / this.height;
+            this.activeMap.camera.updateProjectionMatrix();
         }
 
         if (this.composer) {
@@ -736,27 +856,31 @@ export class BrickEngine {
 
     // world functions
 
-    add_world(name, WorldClass) {
-        const world = new WorldClass(this);
-        this.worlds.set(name, world);
-        return world;
+    add_map(name, GameMapClass) {
+        const map = new GameMapClass(this);
+        this.maps.set(name, map);
+        return map;
     }
 
-    set_world(name) {
-        const newWorld = this.worlds.get(name);
-        if (!newWorld) return;
+    set_map(name) {
+        const newMap = this.maps.get(name);
+        if (!newMap) return;
 
-        if (this.activeWorld) {
-            this.activeWorld.destroy();
+        if (this.activeMap) {
+            this.activeMap.destroy();
         }
 
-        this.activeWorld = newWorld;
+        this.activeMap = newMap;
 
-        this.activeWorld.init?.();
+        this.activeMap.init?.();
 
-        newWorld.camera.aspect = this.width / this.height;
-        newWorld.camera.updateProjectionMatrix();
+        newMap.camera.aspect = this.width / this.height;
+        newMap.camera.updateProjectionMatrix();
         this.update_post_process();
+    }
+
+    addToWorkspace(instance) {
+        this.workspace.addChild(instance);
     }
 
     render_ui() {
@@ -778,19 +902,19 @@ export class BrickEngine {
     }
 
     update_post_process() {
-        if (!this.activeScene) return;
+        if (!this.activeMap) return;
 
         this.composer.passes = [];
 
         // Main render
-        const renderPass = new this.RenderPass(this.activeScene.scene, this.activeScene.camera);
+        const renderPass = new this.RenderPass(this.activeMap.scene, this.activeMap.camera);
         this.composer.addPass(renderPass);
 
 
         // GTAO Shadows
         this.gtaoPass = new this.GTAOPass(
-            this.activeScene.scene,
-            this.activeScene.camera,
+            this.activeMap.scene,
+            this.activeMap.camera,
             this.width,
             this.height
         );
@@ -804,7 +928,7 @@ export class BrickEngine {
 
 
         // TAA
-        const taaPass = new this.TAARenderPass(this.activeScene.scene, this.activeScene.camera);
+        const taaPass = new this.TAARenderPass(this.activeMap.scene, this.activeMap.camera);
         taaPass.enabled = false;
         taaPass.unbiased = true;
         taaPass.sampleLevel = 2;
@@ -814,8 +938,8 @@ export class BrickEngine {
         // Outline
         this.outlinePass = new this.OutlinePass(
             new this.THREE.Vector2(this.width * this.dpr, this.height * this.dpr), // Přidáno * this.dpr
-            this.activeScene.scene,
-            this.activeScene.camera
+            this.activeMap.scene,
+            this.activeMap.camera
         );
         this.outlinePass.enabled = false;
         this.outlinePass.edgeStrength = 3;
@@ -836,12 +960,12 @@ export class BrickEngine {
         );
         bloomPass.enabled = false;
         this.composer.addPass(bloomPass);
-        this.activeScene.bokehPass = new this.BokehPass(this.activeScene.scene, this.activeScene.camera, {
+        this.activeMap.bokehPass = new this.BokehPass(this.activeMap.scene, this.activeMap.camera, {
             focus: 10.0,
             aperture: 0.001,
             maxblur: 0
         });
-        this.composer.addPass(this.activeScene.bokehPass);
+        this.composer.addPass(this.activeMap.bokehPass);
 
 
         // SMAA
@@ -1415,9 +1539,9 @@ export class BrickEngine {
 
     play_sound(name, options = {}) {
         const buffer = this.get_sound(name);
-        if (!buffer || !this.activeScene) return null;
+        if (!buffer || !this.activeMap) return null;
 
-        const sound = new this.THREE.Audio(this.activeScene.listener);
+        const sound = new this.THREE.Audio(this.activeMap.listener);
         sound.setBuffer(buffer);
         sound.setLoop(options.loop ?? false);
         sound.setVolume(options.volume ?? 1.0);
@@ -1432,9 +1556,9 @@ export class BrickEngine {
 
     play_sound_3d(name, position, options = {}) {
         const buffer = this.get_sound(name);
-        if (!buffer || !this.activeScene) return null;
+        if (!buffer || !this.activeMap) return null;
 
-        const sound = new this.THREE.PositionalAudio(this.activeScene.listener);
+        const sound = new this.THREE.PositionalAudio(this.activeMap.listener);
         sound.setBuffer(buffer);
         sound.setRefDistance(options.refDistance ?? 1.0);
         sound.setMaxDistance(options.maxDistance ?? 100.0);
@@ -1443,7 +1567,7 @@ export class BrickEngine {
 
         const audioLoaderObject = new this.THREE.Object3D();
         audioLoaderObject.position.set(position.x, position.y, position.z);
-        this.activeScene.scene.add(audioLoaderObject);
+        this.activeMap.scene.add(audioLoaderObject);
         audioLoaderObject.add(sound);
 
         sound.play();
@@ -1451,7 +1575,7 @@ export class BrickEngine {
         if (!options.loop) {
             sound.source.onended = () => {
                 sound.disconnect();
-                this.activeScene.scene.remove(audioLoaderObject);
+                this.activeMap.scene.remove(audioLoaderObject);
             };
         }
 
@@ -1496,8 +1620,8 @@ export class BrickEngine {
             while (this.accumulator >= this.fixedTimeStep) {
 
                 // physics and game logic updates
-                if (this.activeScene && this.activeScene.world) {
-                    this.activeScene.update(this.fixedTimeStep);
+                if (this.activeMap && this.activeMap.world) {
+                    this.activeMap.update(this.fixedTimeStep);
                 }
 
                 this.accumulator -= this.fixedTimeStep;
@@ -1508,12 +1632,12 @@ export class BrickEngine {
             // render updates
             this.clear2D();
             this.render_ui();
-            if (this.renderer && this.activeScene) {
-                this.activeScene.render(alpha, renderDt);
+            if (this.renderer && this.activeMap) {
+                this.activeMap.render(alpha, renderDt);
 
                 if (this.postProcessEnabled && this.composer) {
-                    if (this.blackHolePass && this.blackHolePass.enabled && this.activeScene.camera) {
-                        const cam = this.activeScene.camera;
+                    if (this.blackHolePass && this.blackHolePass.enabled && this.activeMap.camera) {
+                        const cam = this.activeMap.camera;
                         this.blackHolePass.uniforms["time"].value = time / 1000;
                         this.blackHolePass.uniforms["cameraPos"].value.copy(cam.position);
 
@@ -1526,7 +1650,7 @@ export class BrickEngine {
                     }
                     this.composer.render();
                 } else {
-                    this.renderer.render(this.activeScene.scene, this.activeScene.camera);
+                    this.renderer.render(this.activeMap.scene, this.activeMap.camera);
                 }
             }
 
