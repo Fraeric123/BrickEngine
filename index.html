@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ThreeJS Engine FPS</title>
+    <title>BrickEngine - Ultimate Test</title>
     <style>
         html,
         body {
@@ -13,57 +13,169 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background: #0b1020;
-            font-family: Arial, sans-serif;
+            background: #000;
+        }
+
+        #ui {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 15px;
+            pointer-events: none;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+
+        .key {
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 4px;
+            border: 1px solid #777;
         }
     </style>
 </head>
 
 <body>
-    <script type="module">
 
+    <script type="module">
+        import * as THREE from './libs/three.module.js';
         import {
-            BrickEngine,
-            GameMap
+            BrickEngine, GameMap, BasePart,
+            InteractDetector,
+            JSScript, Folder,
+            Lighting, Material,
+            Sky
         } from './brickengine.js';
 
-        class MyMap extends GameMap {
+        class DemoMap extends GameMap {
             init() {
                 super.init();
-                this.scene.background = new this.engine.THREE.Color(0x444488);
+                const engine = this.engine;
 
-                const ambientLight = new this.engine.THREE.AmbientLight(0xffffff, 0.5);
-                this.scene.add(ambientLight);
+                this.findFirstChild("Lighting")
+                    .set("sunColor", 0xfffaf0)
+                    .set("sunIntensity", 7.0)
+                    .set("sunPosition", new THREE.Vector3(20, 50, 10))
+                    .set("ambientIntensity", 0.3)
 
-                const directionalLight = new this.engine.THREE.DirectionalLight(0xffffff, 1);
-                directionalLight.position.set(5, 10, 7);
-                this.scene.add(directionalLight);
+                const sky = new Sky(engine);
+                sky.set("hdri", "sky");
+                sky.set("exposure", 0.7);
+                this.findFirstChild("Lighting").addChild(sky);
 
-                const geometry = new this.engine.THREE.BoxGeometry(1, 1, 1);
-                const material = new this.engine.THREE.MeshStandardMaterial({ color: 0x00ff00 });
-                const cube = new this.engine.THREE.Mesh(geometry, material);
+                this.add(new BasePart(engine)
+                    .set_name("Baseplate")
+                    .set_size(200, 1, 200)
+                    .set_position(0, -0.5, 0)
+                    .set_color(0xffffff)
+                    .set_anchored(true)
+                    .set_material("debug_orange")
+                );
 
-                cube.position.set(0, 0, 0);
-                this.scene.add(cube);
+                const button = new BasePart(engine)
+                    .set_size(2, 2, 2)
+                    .set_position(10, 1, 0)
+                    .set_anchored(true)
+                    .set_color(0xffffff)
+                    .set_material("debug_red")
+                    .set_name("Button");
 
-                console.log("Mapa inicializována s kostkou.");
+                const detector = new InteractDetector(engine);
+                detector.onInteract = () => {
+                    button.set_color(Math.random() * 0xffffff);
+                    const drop = new BasePart(engine)
+                        .set_size(1, 1, 1)
+                        .set_position(10, 10, 0)
+                        .set_color(0xffffff)
+                        .set_anchored(false)
+                        .set_material("debug_purple")
+                        .set_name("Drop");
+                    this.add(drop);
+                };
+                button.addChild(detector);
+                this.add(button);
+
+                const spinner = new BasePart(engine)
+                    .set_size(4, 0.5, 4)
+                    .set_position(-10, 2, -10)
+                    .set_color(0xffffff)
+                    .set_anchored(true)
+                    .set_material("debug_green")
+                    .set_name("Spinner");
+
+                const script = new JSScript(engine);
+                script.script = {
+                    update: (script, dt) => {
+                        script.parent.set_angular_velocity(0, 200 * dt, 0);
+                    }
+                };
+                spinner.addChild(script);
+                this.add(spinner);
+
+                const folder = new Folder(engine);
+                for (let i = 0; i < 20; i++) {
+                    const p = new BasePart(engine)
+                        .set_position(Math.random() * 4 - 2, 10 + i, Math.random() * 4 - 2)
+                        .set_anchored(false)
+                        .set_color(0xffffff)
+                        .set_material("debug_purple")
+                        .set_name(`Part_${i}`);
+                    folder.addChild(p);
+                }
+                this.add(folder);
+            }
+
+            update(dt) {
+                super.update(dt);
             }
         }
 
-        let engine = new BrickEngine();
+        const engine = new BrickEngine();
+
+        engine.add_texture("debug_orange", "./assets/debug/Orange/texture_01.png")
+            .add_texture("debug_red", "./assets/debug/Red/texture_01.png")
+            .add_texture("debug_purple", "./assets/debug/Purple/texture_01.png")
+            .add_texture("debug_green", "./assets/debug/Green/texture_01.png")
+            .add_hdri("sky", "./assets/sky/cloudy.hdr")
+
+        engine.add_material(new Material(engine, "debug_orange")
+            .set("roughness", 0.1)
+            .set("metalness", 0.1)
+            .set("uvScale", new THREE.Vector2(20, 20))
+            .set("uvOffset", new THREE.Vector2(0, 0)))
+            .get_material("debug_orange").properties.textures.albedo = "debug_orange"
+
+        engine.add_material(new Material(engine, "debug_red")
+            .set("roughness", 0.1)
+            .set("metalness", 0.1)
+            .set("uvScale", new THREE.Vector2(1, 1))
+            .set("uvOffset", new THREE.Vector2(0, 0)))
+            .get_material("debug_red").properties.textures.albedo = "debug_red";
+
+        engine.add_material(new Material(engine, "debug_purple")
+            .set("roughness", 0.1)
+            .set("metalness", 0.1)
+            .set("uvScale", new THREE.Vector2(1, 1))
+            .set("uvOffset", new THREE.Vector2(0, 0)))
+            .get_material("debug_purple").properties.textures.albedo = "debug_purple";
+
+        engine.add_material(new Material(engine, "debug_green")
+            .set("roughness", 0.1)
+            .set("metalness", 0.1)
+            .set("uvScale", new THREE.Vector2(1, 1))
+            .set("uvOffset", new THREE.Vector2(0, 0)))
+            .get_material("debug_green").properties.textures.albedo = "debug_green";
 
         engine.init({
-
-            display_mode: 'normal_canvas'
-
+            display_mode: 'normal_canvas'            
         }).then(() => {
-
-            engine.add_map("map1", MyMap);
-            engine.set_map("map1");
-            engine.start();
-
+            engine.postProcessEnabled = true;
+            engine.add_map("main_test", DemoMap);
+            engine.set_map("main_test").start();
         });
-
     </script>
 </body>
 

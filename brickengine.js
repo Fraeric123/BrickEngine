@@ -20,7 +20,245 @@ import { SMAAPass } from './libs/postprocessing/SMAAPass.js';
 import { OutlinePass } from './libs/postprocessing/OutlinePass.js';
 import { TAARenderPass } from './libs/postprocessing/TAARenderPass.js';
 
+
 /* Exports */
+
+export class StudioUI {
+    constructor(engine) {
+        this.engine = engine;
+        this.selectedInstance = null;
+        this.isVisible = false;
+
+        this.creatableClasses = ["BasePart", "Folder"];
+
+        this._initDOM();
+    }
+
+    _initDOM() {
+        this.container = document.createElement('div');
+        this.container.id = 'studio-ui';
+        Object.assign(this.container.style, {
+            position: 'fixed', right: '0', top: '0', width: '300px', height: '100%',
+            background: '#2b2b2b', color: '#cccccc', fontFamily: '"Segoe UI", Tahoma, sans-serif',
+            fontSize: '13px', display: 'none', flexDirection: 'column', zIndex: '9999',
+            borderLeft: '1px solid #111', userSelect: 'none'
+        });
+
+        const explorerHeader = document.createElement('div');
+        explorerHeader.innerHTML = '<b>Explorer</b>';
+        Object.assign(explorerHeader.style, { background: '#1e1e1e', padding: '5px 10px', borderBottom: '1px solid #111' });
+
+        this.treeContainer = document.createElement('div');
+        Object.assign(this.treeContainer.style, { flex: '1', overflowY: 'auto', padding: '5px' });
+
+        const propsHeader = document.createElement('div');
+        propsHeader.innerHTML = '<b>Properties</b>';
+        Object.assign(propsHeader.style, { background: '#1e1e1e', padding: '5px 10px', borderBottom: '1px solid #111', borderTop: '1px solid #111' });
+
+        this.propsContainer = document.createElement('div');
+        Object.assign(this.propsContainer.style, { height: '40%', overflowY: 'auto', padding: '5px', display: 'flex', flexDirection: 'column', gap: '2px' });
+
+        this.container.appendChild(explorerHeader);
+        this.container.appendChild(this.treeContainer);
+        this.container.appendChild(propsHeader);
+        this.container.appendChild(this.propsContainer);
+        document.body.appendChild(this.container);
+
+        const style = document.createElement('style');
+        style.innerHTML = `
+            .studio-item { display: flex; align-items: center; padding: 3px 5px; cursor: pointer; border-radius: 3px; }
+            .studio-item:hover { background: #3a3a3a; }
+            .studio-item.selected { background: #0078d7; color: white; }
+            .studio-icon { width: 16px; height: 16px; margin-right: 6px; }
+            .studio-add-btn { margin-left: auto; width: 16px; height: 16px; background: #444; text-align: center; line-height: 14px; border-radius: 3px; display: none; }
+            .studio-item:hover .studio-add-btn { display: block; }
+            .studio-add-btn:hover { background: #666; }
+            
+            .prop-row { display: grid; grid-template-columns: 100px 1fr; border: 1px solid #333; margin-bottom: -1px; }
+            .prop-name { background: #252525; padding: 3px 5px; border-right: 1px solid #333; overflow: hidden; text-overflow: ellipsis; }
+            .prop-val { background: #1e1e1e; padding: 2px; display: flex; gap: 2px; }
+            .prop-val input { width: 100%; background: transparent; border: none; color: #ccc; padding: 0 5px; font-family: monospace; }
+            .prop-val input:focus { outline: 1px solid #0078d7; background: #2a2a2a; }
+            .prop-vec-input { width: 30%; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    toggle(force) {
+        this.isVisible = force !== undefined ? force : !this.isVisible;
+        this.container.style.display = this.isVisible ? 'flex' : 'none';
+        if (this.isVisible) this.refreshExplorer();
+    }
+
+    refreshExplorer() {
+        this.treeContainer.innerHTML = '';
+        if (!this.engine.activeMap) return;
+        this._buildTree(this.engine.activeMap, this.treeContainer, 0);
+    }
+
+    _buildTree(instance, parentElement, depth) {
+        const itemDiv = document.createElement('div');
+        itemDiv.className = `studio-item ${this.selectedInstance === instance ? 'selected' : ''}`;
+        itemDiv.style.paddingLeft = `${depth * 15 + 5}px`;
+
+        const icon = document.createElement('img');
+        icon.className = 'studio-icon';
+        icon.src = `./assets/icons/explorer/${instance.classname}.png`;
+        icon.onerror = () => { icon.src = './assets/icons/explorer/Instance.png'; }; // Defaultní ikona
+
+        const text = document.createElement('span');
+        text.innerText = instance.name || instance.classname;
+
+        const addBtn = document.createElement('div');
+        addBtn.className = 'studio-add-btn';
+        addBtn.innerText = '+';
+        addBtn.onclick = (e) => {
+            e.stopPropagation();
+            const type = prompt(`Co přidat do ${text.innerText}?\nMožnosti: ${this.creatableClasses.join(', ')}`, "BasePart");
+            if (type && this.creatableClasses.includes(type)) {
+                // Najdeme třídu v globálním kontextu nebo přes modul (zde použijeme malý trik)
+                const evalType = eval(type); // Pokud máš třídy exportované, musíme k nim mít přístup
+                if (evalType) {
+                    const newInst = new evalType(this.engine);
+                    instance.addChild(newInst);
+                    newInst.init();
+                    this.refreshExplorer();
+                }
+            }
+        };
+
+        itemDiv.appendChild(icon);
+        itemDiv.appendChild(text);
+        if (instance.classname === 'Folder' || instance.classname === 'GameMap' || instance.classname === 'Workspace') {
+            itemDiv.appendChild(addBtn);
+        }
+
+        itemDiv.onclick = (e) => {
+            e.stopPropagation();
+            this.selectInstance(instance);
+            this.refreshExplorer(); // Re-render pro aktualizaci .selected třídy
+        };
+
+        parentElement.appendChild(itemDiv);
+
+        // Rekurze pro potomky
+        for (const child of instance.children) {
+            this._buildTree(child, parentElement, depth + 1);
+        }
+    }
+
+    selectInstance(instance) {
+        this.selectedInstance = instance;
+        this.renderProperties();
+
+        if (this.engine.outlinePass) {
+            if (instance && instance.object3D) {
+                this.engine.outlinePass.selectedObjects = [instance.object3D];
+                this.engine.outlinePass.enabled = true; // Ujistíme se, že je zapnutý
+            } else {
+                this.engine.outlinePass.selectedObjects = [];
+            }
+        }
+    }
+
+    renderProperties() {
+        this.propsContainer.innerHTML = '';
+        if (!this.selectedInstance || !this.selectedInstance.properties) return;
+
+        const inst = this.selectedInstance;
+        const props = inst.properties;
+
+        for (const key in props) {
+            const val = props[key];
+            const row = document.createElement('div');
+            row.className = 'prop-row';
+
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'prop-name';
+            nameDiv.innerText = key;
+
+            const valDiv = document.createElement('div');
+            valDiv.className = 'prop-val';
+
+            // ROZPOZNÁNÍ TYPU VLASTNOSTI
+            if (val && val.isVector3) {
+                // Vector3 (XYZ)
+                ['x', 'y', 'z'].forEach(axis => {
+                    const inp = document.createElement('input');
+                    inp.type = 'number';
+                    inp.value = val[axis].toFixed(2);
+                    inp.className = 'prop-vec-input';
+                    inp.onchange = () => this._updateProperty(inst, key, axis, parseFloat(inp.value));
+                    valDiv.appendChild(inp);
+                });
+            } else if (val && val.isEuler) {
+                // Euler / Rotation
+                ['x', 'y', 'z'].forEach(axis => {
+                    const inp = document.createElement('input');
+                    inp.type = 'number';
+                    // Zobrazení ve stupních pro uživatele
+                    inp.value = (val[axis] * (180 / Math.PI)).toFixed(1);
+                    inp.className = 'prop-vec-input';
+                    inp.onchange = () => this._updateProperty(inst, key, axis, parseFloat(inp.value) * (Math.PI / 180));
+                    valDiv.appendChild(inp);
+                });
+            } else if (key.toLowerCase().includes('color')) {
+                // Barva
+                const inp = document.createElement('input');
+                inp.type = 'color';
+                inp.value = '#' + val.toString(16).padStart(6, '0');
+                inp.onchange = () => this._updateProperty(inst, key, null, parseInt(inp.value.replace('#', '0x')));
+                valDiv.appendChild(inp);
+            } else if (typeof val === 'boolean') {
+                // Checkbox
+                const inp = document.createElement('input');
+                inp.type = 'checkbox';
+                inp.checked = val;
+                inp.onchange = () => this._updateProperty(inst, key, null, inp.checked);
+                valDiv.appendChild(inp);
+            } else {
+                // Číslo nebo String
+                const inp = document.createElement('input');
+                inp.type = typeof val === 'number' ? 'number' : 'text';
+                inp.value = val;
+                inp.onchange = () => this._updateProperty(inst, key, null, typeof val === 'number' ? parseFloat(inp.value) : inp.value);
+                valDiv.appendChild(inp);
+            }
+
+            row.appendChild(nameDiv);
+            row.appendChild(valDiv);
+            this.propsContainer.appendChild(row);
+        }
+    }
+
+    _updateProperty(instance, key, subKey, newValue) {
+        let finalValue = newValue;
+
+        // Pokud upravujeme osu u Vector3 / Euler
+        if (subKey) {
+            const vec = instance.properties[key].clone();
+            vec[subKey] = newValue;
+            finalValue = vec;
+        }
+
+        // Zavoláme setter, pokud existuje (např. set_position, set_color)
+        const setterName = `set_${key}`;
+        if (typeof instance[setterName] === 'function') {
+            if (finalValue.isVector3 || finalValue.isEuler) {
+                instance[setterName](finalValue.x, finalValue.y, finalValue.z);
+            } else {
+                instance[setterName](finalValue);
+            }
+        } else if (typeof instance.set === 'function') {
+            instance.set(key, finalValue);
+        } else {
+            instance.properties[key] = finalValue;
+        }
+
+        // Pokud to změnilo jméno, musíme překreslit Explorer
+        if (key === 'name') this.refreshExplorer();
+    }
+}
 
 export class Instance {
     constructor(engine, name) {
@@ -37,102 +275,105 @@ export class Instance {
         this.children = [];
     }
 
-    sync_with_physics(alpha) {
-        for (const instance of this.children) {
-            instance.sync_with_physics(alpha);
+    sync_with_physics(_alpha) {
+        for (const child of this.children) child.sync_with_physics?.(_alpha);
+    }
+
+    set(key, value) {
+        if (this.properties && key in this.properties) {
+            this.properties[key] = value;
+            this._apply?.();
+        } else {
+            this[key] = value;
         }
+        return this;
     }
 
     addChild(child) {
+        if (!child) return;
         child.parent = this;
         this.children.push(child);
     }
 
     removeChild(child) {
         const i = this.children.indexOf(child);
-        if (i !== -1) {
-            child.parent = null;
-            this.children.splice(i, 1);
-        }
+        if (i !== -1) { child.parent = null; this.children.splice(i, 1); }
     }
 
-    getChildren() {
-        return this.children;
-    }
+    getChildren() { return this.children; }
 
     get_decendants() {
-        let decendants = [];
-        for (const child of this.children) {
-            decendants.push(child);
-            decendants = decendants.concat(child.get_decendants());
-        }
-        return decendants;
+        let out = [];
+        for (const c of this.children) { out.push(c); out = out.concat(c.get_decendants()); }
+        return out;
     }
 
-    findFirstChild(name) {
-        return this.children.find(c => c.name === name);
-    }
+    findFirstChild(name) { return this.children.find(c => c.name === name); }
 
-    find_first_child_of_class(type) {
-        for (const child of this.children) {
-            if (child.classname === type) {
-                return child;
-            }
-        }
-        return null;
-    }
+    find_first_child_of_class(t) { return this.children.find(c => c.classname === t) ?? null; }
 
-    find_all_children_of_class(type) {
-        return this.children.filter(child => child.classname === type);
-    }
+    find_all_children_of_class(t) { return this.children.filter(c => c.classname === t); }
+
+    find_all_decendants_of_class(t) { return this.get_decendants().filter(c => c.classname === t); }
 
     init() {
         this.onAdded();
+        for (const child of this.children) {
+            child.init();
+        }
     }
 
     update(dt) {
         this.onUpdated(dt);
-        for (const child of this.children) {
-            child.update?.(dt);
-        }
+        for (const c of this.children) c.update?.(dt);
     }
 
     destroy() {
         this.onDestroyed();
         if (this.object3D) this.object3D.parent?.remove(this.object3D);
-        if (this.rigidBody) this.engine.activeMap.world.removeRigidBody(this.rigidBody);
-        for (const child of this.children) {
-            child.destroy?.();
-        }
+        if (this.rigidBody && this.engine.activeMap)
+            this.engine.activeMap.world.removeRigidBody(this.rigidBody);
+        for (const c of [...this.children]) c.destroy?.();
         this.children = [];
         this.parent = null;
     }
 }
 
-export class MaterialDefinition extends Instance {
+export class Material extends Instance {
     constructor(engine, name) {
         super(engine, name);
-
         this.properties = {
-            roughness: 0.5,
-            metalness: 0.5,
-            transparent: false,
-            opacity: 1.0,
-            textures: {
-                albedo: null,
-                normal: null,
-                roughness: null,
-                metalness: null,
-                ao: null,
-                alpha: null
-            },
-            sounds: {
-                impact: null,
-                step: null,
-                break: null,
-                slide: null
-            }
+            roughness: 0.5, metalness: 0.5, transparent: false, opacity: 1.0,
+            textures: { albedo: null, normal: null, roughness: null, metalness: null, ao: null, alpha: null },
+            sounds: { impact: null, step: null, break: null, slide: null },
+            uvScale: new THREE.Vector2(1, 1),
+            uvOffset: new THREE.Vector2(0, 0)
         };
+
+    }
+}
+
+export class Debris extends Instance {
+    constructor(engine) {
+        super(engine, "Debris");
+        this._queue = []; // { instance, lifetime, elapsed }
+    }
+
+    add_with_lifetime(instance, parent, lifetime) {
+        if (this.engine.activeMap) this.engine.activeMap.add_instance(instance, parent);
+        this._queue.push({ instance, lifetime, elapsed: 0 });
+        return instance;
+    }
+
+    update(dt) {
+        for (let i = this._queue.length - 1; i >= 0; i--) {
+            const item = this._queue[i];
+            item.elapsed += dt;
+            if (item.elapsed >= item.lifetime) {
+                item.instance.destroy();
+                this._queue.splice(i, 1);
+            }
+        }
     }
 }
 
@@ -145,21 +386,256 @@ export class BasePart extends Instance {
             position: new this.engine.THREE.Vector3(0, 0, 0),
             rotation: new this.engine.THREE.Vector3(0, 0, 0),
             color: 0x00ff00,
-            material: null
+            material: null,
+            anchored: false,
+            canCollide: true,
+            castShadow: true,
+            receiveShadow: true,
+            transparency: 0,
+            mass: 1.0
         };
+
+        this.object3D = null;
+        this.rigidBody = null;
+        this.collider = null;
 
         this.onCollide = () => { };
     }
 
-    
+    init() {
+        super.init();
+        this._create3D();
+        this._createPhysics();
+    }
+
+    _create3D() {
+        const map = this.engine.activeMap; if (!map) return;
+        const p = this.properties;
+        const geo = new this.engine.THREE.BoxGeometry(p.size.x, p.size.y, p.size.z);
+        this.materialDef = this.engine.get_material(p.material || "default");
+        const mProps = this.materialDef.properties;
+        const mat = new this.engine.THREE.MeshStandardMaterial({
+            color: p.color,
+            transparent: p.transparency > 0,
+            opacity: 1 - p.transparency,
+            roughness: mProps.roughness,
+            metalness: mProps.metalness
+        });
+        if (mProps.textures && mProps.textures.albedo) {
+            const tex = this.engine.get_texture(mProps.textures.albedo);
+            if (tex) {
+                const instanceTex = tex.clone();
+
+                instanceTex.wrapS = instanceTex.wrapT = this.engine.THREE.RepeatWrapping;
+                instanceTex.colorSpace = this.engine.THREE.SRGBColorSpace;
+
+                if (mProps.uvScale) {
+                    instanceTex.repeat.set(mProps.uvScale.x, mProps.uvScale.y);
+                }
+                if (mProps.uvOffset) {
+                    instanceTex.offset.set(mProps.uvOffset.x, mProps.uvOffset.y);
+                }
+
+                instanceTex.needsUpdate = true;
+                mat.map = instanceTex;
+            }
+        }
+        this.object3D = new this.engine.THREE.Mesh(geo, mat);
+        this.object3D.position.copy(p.position);
+        this.object3D.rotation.copy(p.rotation instanceof this.engine.THREE.Euler
+            ? p.rotation : new this.engine.THREE.Euler(p.rotation.x ?? 0, p.rotation.y ?? 0, p.rotation.z ?? 0));
+        this.object3D.castShadow = p.castShadow;
+        this.object3D.receiveShadow = p.receiveShadow;
+        this.object3D.userData.instanceId = this.uuid;
+        this.object3D.userData.instance = this;
+        map.scene.add(this.object3D);
+    }
+
+    _createPhysics() {
+        const map = this.engine.activeMap; if (!map) return;
+        const p = this.properties;
+        const euler = p.rotation instanceof this.engine.THREE.Euler
+            ? p.rotation : new this.engine.THREE.Euler(p.rotation.x ?? 0, p.rotation.y ?? 0, p.rotation.z ?? 0);
+        const q = new this.engine.THREE.Quaternion().setFromEuler(euler);
+
+        const desc = p.anchored
+            ? this.engine.rapier.RigidBodyDesc.fixed()
+            : this.engine.rapier.RigidBodyDesc.dynamic();
+        desc.setTranslation(p.position.x, p.position.y, p.position.z);
+        desc.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+        if (!p.anchored) desc.setAdditionalMass(p.mass || 1.0);
+
+        this.rigidBody = map.world.createRigidBody(desc);
+        this.rigidBody.userData = { instance: this };
+
+        if (p.canCollide) {
+            const cd = this.engine.rapier.ColliderDesc.cuboid(p.size.x / 2, p.size.y / 2, p.size.z / 2);
+            cd.setActiveEvents(this.engine.rapier.ActiveEvents.COLLISION_EVENTS);
+            this.collider = map.world.createCollider(cd, this.rigidBody);
+        }
+    }
+
+    sync_with_physics(_alpha) {
+        if (this.rigidBody && this.object3D && !this.properties.anchored) {
+            const t = this.rigidBody.translation();
+            const r = this.rigidBody.rotation();
+            this.object3D.position.set(t.x, t.y, t.z);
+            this.object3D.quaternion.set(r.x, r.y, r.z, r.w);
+        }
+        for (const c of this.children) c.sync_with_physics?.(_alpha);
+    }
+
+
+    // property management
+
+    set_name(name) {
+        super.name = name;
+        return this;
+    }
+
+    set_material(materialName) {
+        const matDef = this.engine.get_material(materialName);
+        if (!matDef) return this;
+
+        this.properties.material = materialName;
+        this.materialDef = matDef;
+
+        if (this.object3D) {
+            const p = this.properties;
+            const textures = matDef.properties.textures;
+
+            const mat = new this.engine.THREE.MeshStandardMaterial({
+                color: p.color,
+                transparent: p.transparency > 0,
+                opacity: 1 - p.transparency,
+                roughness: matDef.properties.roughness,
+                metalness: matDef.properties.metalness
+            });
+
+            if (textures.albedo) mat.map = this.engine.get_texture(textures.albedo);
+            if (textures.normal) mat.normalMap = this.engine.get_texture(textures.normal);
+            if (textures.roughness) mat.roughnessMap = this.engine.get_texture(textures.roughness);
+            if (textures.metalness) mat.metalnessMap = this.engine.get_texture(textures.metalness);
+            if (textures.ao) mat.aoMap = this.engine.get_texture(textures.ao);
+
+            this.object3D.material.dispose();
+            this.object3D.material = mat;
+        }
+
+        return this;
+    }
+
+    set_size(x, y, z) {
+        this.properties.size.set(x, y, z);
+        if (this.object3D) {
+            this.object3D.geometry.dispose();
+            this.object3D.geometry = new this.engine.THREE.BoxGeometry(x, y, z);
+        }
+        if (this.collider && this.engine.activeMap) {
+            this.engine.activeMap.world.removeCollider(this.collider, false);
+            const cd = this.engine.rapier.ColliderDesc.cuboid(x / 2, y / 2, z / 2);
+            cd.setActiveEvents(this.engine.rapier.ActiveEvents.COLLISION_EVENTS);
+            this.collider = this.engine.activeMap.world.createCollider(cd, this.rigidBody);
+        }
+        return this;
+    }
+
+    set_position(x, y, z) {
+        this.properties.position.set(x, y, z);
+        if (this.object3D) this.object3D.position.set(x, y, z);
+        if (this.rigidBody) this.rigidBody.setTranslation({ x, y, z }, true);
+        return this;
+    }
+
+    set_rotation(x, y, z) {
+        const e = new this.engine.THREE.Euler(x, y, z);
+        this.properties.rotation = e;
+        const q = new this.engine.THREE.Quaternion().setFromEuler(e);
+        if (this.object3D) this.object3D.rotation.copy(e);
+        if (this.rigidBody) this.rigidBody.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+        return this;
+    }
+
+    set_color(color) {
+        this.properties.color = color;
+        if (this.object3D) this.object3D.material.color.set(color);
+        return this;
+    }
+
+    set_anchored(anchored) {
+        this.properties.anchored = anchored;
+        if (this.rigidBody) {
+            this.rigidBody.setBodyType(anchored ? 1 : 0, true); // 1=Fixed, 0=Dynamic
+        }
+        return this;
+    }
+
+    set_transparency(t) {
+        this.properties.transparency = t;
+        if (this.object3D) {
+            this.object3D.material.transparent = t > 0;
+            this.object3D.material.opacity = 1 - t;
+        }
+        return this;
+    }
+
+    set_cast_shadow(v) {
+        this.properties.castShadow = v;
+        if (this.object3D) this.object3D.castShadow = v;
+        return this;
+    }
+
+    // physics interactions
+
+    apply_impulse(x, y, z) { if (this.rigidBody) this.rigidBody.applyImpulse({ x, y, z }, true); return this; }
+    apply_force(x, y, z) { if (this.rigidBody) this.rigidBody.addForce({ x, y, z }, true); return this; }
+    apply_angular_impulse(x, y, z) { if (this.rigidBody) this.rigidBody.applyTorqueImpulse({ x, y, z }, true); return this; }
+    set_angular_velocity(x, y, z) { if (this.rigidBody) this.rigidBody.setAngvel({ x, y, z }, true); return this; }
+    set_velocity(x, y, z) { if (this.rigidBody) this.rigidBody.setLinvel({ x, y, z }, true); return this; }
+
+    get_position() {
+        if (this.rigidBody) { const t = this.rigidBody.translation(); return new this.engine.THREE.Vector3(t.x, t.y, t.z); }
+        return this.properties.position.clone();
+    }
+
+    get_rotation() {
+        if (this.rigidBody) { const r = this.rigidBody.rotation(); return new this.engine.THREE.Euler().setFromQuaternion(new this.engine.THREE.Quaternion(r.x, r.y, r.z, r.w)); }
+        return this.properties.rotation.clone();
+    }
+
+    get_angular_velocity() {
+        if (this.rigidBody) { const v = this.rigidBody.angvel(); return new this.engine.THREE.Vector3(v.x, v.y, v.z); }
+        return new this.engine.THREE.Vector3();
+    }
+
+    get_velocity() {
+        if (this.rigidBody) { const v = this.rigidBody.linvel(); return new this.engine.THREE.Vector3(v.x, v.y, v.z); }
+        return new this.engine.THREE.Vector3();
+    }
 
     update(dt) {
         if (!this.engine.activeMap || !this.parent) return;
-        for (const child of this.children) {
-            if (child.update) {
-                child.update(dt);
-            }
+        this.onUpdated(dt);
+
+
+
+        for (const c of this.children) c.update?.(dt);
+    }
+
+    destroy() {
+        if (this.object3D) {
+            this.engine.activeMap?.scene.remove(this.object3D);
+            this.object3D.geometry?.dispose();
+            this.object3D.material?.dispose();
+            this.object3D = null;
         }
+        if (this.rigidBody && this.engine.activeMap) {
+            this.engine.activeMap.world.removeRigidBody(this.rigidBody);
+            this.rigidBody = null;
+        }
+        this.onDestroyed();
+        for (const c of [...this.children]) c.destroy?.();
+        this.children = []; this.parent = null;
     }
 }
 
@@ -194,7 +670,30 @@ export class Folder extends Instance {
 }
 
 
+export class InteractDetector extends Instance {
+    constructor(engine) {
+        super(engine, "InteractDetector");
+        this.properties = { maxDistance: 5.0, prompt: 'Stiskni F pro interakci', enabled: true };
+        this.onInteract = (_parent) => { };
+        this._raycaster = new engine.THREE.Raycaster();
+        this._isLooking = false;
+    }
 
+    update(_dt) {
+        if (!this.properties.enabled || !this.parent?.object3D || !this.engine.activeMap) return;
+        this._raycaster.setFromCamera({ x: 0, y: 0 }, this.engine.activeMap.camera);
+        const hits = this._raycaster.intersectObject(this.parent.object3D, true);
+        const prev = this._isLooking;
+        this._isLooking = hits.length > 0 && hits[0].distance <= this.properties.maxDistance;
+
+        if (this._isLooking && this.engine.input.interact) {
+            this.engine.input.interact = false;
+            this.onInteract(this.parent);
+        }
+    }
+
+    is_looking() { return this._isLooking; }
+}
 
 export class Lighting extends Instance {
     constructor(engine) {
@@ -203,33 +702,129 @@ export class Lighting extends Instance {
         this.properties = {
             sunColor: 0xffffff,
             sunIntensity: 1.0,
-            sunPosition: new this.engine.THREE.Vector3(0, 1, 0),
+            sunPosition: new this.engine.THREE.Vector3(50, 100, 50),
             ambientColor: 0xffffff,
             ambientIntensity: 0.2
         };
+
+        this._sun = null;
+        this._ambient = null;
+    }
+
+    init() {
+        super.init();
+        this._apply();
+    }
+
+    _apply() {
+        const map = this.engine.activeMap;
+        if (!map) return;
+        const scene = map.scene;
+
+        if (!this._sun) {
+            this._sun = scene.getObjectByName("SunLight") || new this.engine.THREE.DirectionalLight();
+            this._sun.name = "SunLight";
+            this._sun.castShadow = true;
+            this._sun.shadow.mapSize.width = this._sun.shadow.mapSize.height = 2048;
+            this._sun.shadow.camera.near = 0.5;
+            this._sun.shadow.camera.far = 500;
+            this._sun.shadow.camera.left = this._sun.shadow.camera.bottom = -100;
+            this._sun.shadow.camera.right = this._sun.shadow.camera.top = 100;
+
+            if (!this._sun.parent) scene.add(this._sun);
+        }
+
+        this._sun.color.set(this.properties.sunColor);
+        this._sun.intensity = this.properties.sunIntensity;
+        this._sun.position.copy(this.properties.sunPosition);
+
+        if (!this._ambient) {
+            this._ambient = scene.getObjectByName("AmbientLight") || new this.engine.THREE.AmbientLight();
+            this._ambient.name = "AmbientLight";
+            if (!this._ambient.parent) scene.add(this._ambient);
+        }
+
+        this._ambient.color.set(this.properties.ambientColor);
+        this._ambient.intensity = this.properties.ambientIntensity;
+    }
+
+    set(key, value) {
+        if (key in this.properties) {
+            this.properties[key] = value;
+        }
+        return this;
     }
 
     update(dt) {
-        if (!this.engine.activeMap || !this.parent || this.parent !== this.engine.activeMap) return;
-        const scene = this.engine.activeMap.scene;
+        super.update(dt);
+        this._apply();
+    }
+}
 
-        let sun = scene.getObjectByName("DirectionalLight");
-        if (!sun) {
-            sun = new this.engine.THREE.DirectionalLight(this.properties.sunColor, this.properties.sunIntensity);
-            sun.name = "DirectionalLight";
-            scene.add(sun);
+export class Sky extends Instance {
+    constructor(engine) {
+        super(engine, "Sky");
+
+        this.properties = {
+            hdri: null,
+            exposure: 1.0
+        };
+    }
+
+    _apply() {
+        const map = this.engine.activeMap;
+        if (!map) return;
+
+        const hdriName = this.properties.hdri;
+        if (hdriName) {
+            const texture = this.engine.assets.hdris.get(hdriName);
+
+            if (texture) {
+                texture.mapping = this.engine.THREE.EquirectangularReflectionMapping;
+                map.engine.renderer.toneMappingExposure = this.properties.exposure;
+
+                map.scene.background = texture;
+                map.scene.environment = texture;
+            } else {
+                console.warn(`Sky: HDRI "${hdriName}" not found in assets!`);
+            }
         }
-        sun.color.set(this.properties.sunColor);
-        sun.intensity = this.properties.sunIntensity;
-        sun.position.copy(this.properties.sunPosition);
-        let ambient = scene.getObjectByName("AmbientLight");
-        if (!ambient) {
-            ambient = new this.engine.THREE.AmbientLight(this.properties.ambientColor, this.properties.ambientIntensity);
-            ambient.name = "AmbientLight";
-            scene.add(ambient);
+    }
+
+    init() {
+        super.init();
+    }
+
+    update(dt) {
+        super.update(dt);
+        this._apply();
+    }
+}
+
+export class JSScript extends Instance {
+    constructor(engine) {
+        super(engine, "JSScript");
+        this.properties = { enabled: true };
+        this.script = null;
+        this._ctx = null;
+        this._obj = null;
+    }
+
+    init() {
+        super.init();
+        if (!this.properties.enabled || !this.script) return;
+        this._ctx = { engine: this.engine, map: this.engine.activeMap, parent: this.parent, self: this, THREE: this.engine.THREE };
+        if (typeof this.script === 'function') {
+            this._obj = this.script(this._ctx) ?? {};
+        } else {
+            this._obj = this.script;
+            this._obj.init?.(this._ctx);
         }
-        ambient.color.set(this.properties.ambientColor);
-        ambient.intensity = this.properties.ambientIntensity;
+    }
+
+    update(dt) {
+        if (!this.properties.enabled || !this._obj) return;
+        this._obj.update?.(this._ctx, dt);
     }
 }
 
@@ -302,6 +897,15 @@ export class GameMap extends Instance {
     set_camera_position(x, y, z) {
         this.camera.position.set(x, y, z);
     }
+
+    add_instance(instance, parent = this.workspace) {
+        if (!instance) return;
+        parent.addChild(instance);
+        instance.init();
+        return instance;
+    }
+
+    add(instance) { return this.add_instance(instance, this.workspace); }
 
 
     // physics management
@@ -544,13 +1148,15 @@ export class BrickEngine {
         this.ctx2D = null;
         this.canvas3D = null;
 
+        this.studioUI = null;
+
         // render variables
         this.aspect = 16 / 9;
         this.renderWidth = 2560;
         this.renderHeight = 1440;
         this.fps = 0;
         this.resolutionScale = 1.0;
-        this.postProcessEnabled = true;
+        this.postProcessEnabled = false;
 
         // main variables
         this.maps = new Map();
@@ -591,6 +1197,13 @@ export class BrickEngine {
                 this.THREE.AudioContext.getContext().resume();
             }
         }, { once: true });
+
+        window.addEventListener('mousedown', (e) => {
+            if (e.button === 0) this.input.interact = true;
+        });
+        window.addEventListener('mouseup', (e) => {
+            if (e.button === 0) this.input.interact = false;
+        });
 
         // input setup
         this.input = {
@@ -650,7 +1263,12 @@ export class BrickEngine {
                 console.log("Režim změněn na:", this.engine_mode);
 
                 if (this.engine_mode === "game") {
+                    this.studioUI.toggle(false);
                     this.canvas2D.requestPointerLock();
+                    if (this.outlinePass) this.outlinePass.selectedObjects = [];
+                } else {
+                    document.exitPointerLock();
+                    this.studioUI.toggle(true);
                 }
             }
             if (e.code === 'Space') {
@@ -877,6 +1495,7 @@ export class BrickEngine {
         newMap.camera.aspect = this.width / this.height;
         newMap.camera.updateProjectionMatrix();
         this.update_post_process();
+        return this;
     }
 
     addToWorkspace(instance) {
@@ -947,7 +1566,6 @@ export class BrickEngine {
         this.outlinePass.edgeThickness = 1;
         this.outlinePass.visibleEdgeColor.set('#37ff00');
         this.outlinePass.hiddenEdgeColor.set('#000000');
-        this.outlinePass.renderToScreen = true;
         this.outlinePass.usePatternTexture = false;
         this.outlinePass.overlayMaterial.blending = this.THREE.AdditiveBlending;
         this.composer.addPass(this.outlinePass);
@@ -1405,9 +2023,14 @@ export class BrickEngine {
         return this
     }
 
-    add_hdri(name, path) {
-        this.assets.hdris.set(name, path);
-        return this
+    add_hdri(name, url) {
+        new RGBELoader().load(url, (texture) => {
+            this.assets.hdris.set(name, texture);
+            this.activeMap?.children.forEach(child => {
+                if (child instanceof Sky) child._apply();
+            });
+        });
+        return this;
     }
 
     add_sound(name, path) {
@@ -1596,6 +2219,9 @@ export class BrickEngine {
         this.display_mode = display_mode;
 
         console.log("Initializing engine...");
+
+        this.studioUI = new StudioUI(this);
+
         await this.setup_canvas();
         await this.load_assets();
         await this.setup_render();
